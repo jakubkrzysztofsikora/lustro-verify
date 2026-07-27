@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: lustro-verify-linux-x86_64
+          - os: macos-latest
+            artifact: lustro-verify-macos-arm64
+          - os: windows-latest
+            artifact: lustro-verify-windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev]'
+      - name: build onefile binary
+        run: |
+          pyinstaller --onefile --name lustro-verify \
+            --collect-all cryptography \
+            src/lustro_verify/cli.py
+      - name: rename artifact
+        shell: bash
+        run: |
+          mkdir -p out
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp dist/lustro-verify.exe "out/${{ matrix.artifact }}"
+          else
+            cp dist/lustro-verify "out/${{ matrix.artifact }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lustro-verify-*
+          merge-multiple: true
+      - name: checksums
+        run: sha256sum lustro-verify-* > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            lustro-verify-*
+            SHA256SUMS.txt

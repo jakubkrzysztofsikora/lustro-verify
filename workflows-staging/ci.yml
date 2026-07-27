@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+  schedule:
+    # nightly live smoke (rate-limit aware, non-blocking)
+    - cron: "17 3 * * *"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e '.[dev]'
+      - run: ruff check src tests
+      - run: pytest -q
+
+  live-smoke:
+    # Verify every item currently in /v1/feed against the production key, if
+    # available. Records key-unknown instead of failing when the secret is
+    # absent (the production key is not programmatically obtainable).
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: export current feed (polite, cursor-paginated)
+        run: |
+          python - <<'EOF' > feed-export.json
+          import json
+          from lustro_verify.fetch import LustroFetcher
+          f = LustroFetcher()
+          items = list(f.iter_feed(limit=25))
+          print(json.dumps({"items": items}))
+          f.close()
+          EOF
+      - name: batch verify (key from secret; key-unknown when absent)
+        env:
+          LUSTRO_CORE_PUBLIC_KEY_B64: ${{ secrets.LUSTRO_CORE_PUBLIC_KEY_B64 }}
+        run: |
+          set +e
+          lustro-verify batch feed-export.json --json > attestation.json
+          code=$?
+          echo "batch exit code: $code"
+          # 2 = key unavailable (secret absent) is expected, not a failure
+          if [ "$code" -eq 2 ]; then exit 0; fi
+          exit "$code"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-attestation
+          path: |
+            feed-export.json
+            attestation.json
